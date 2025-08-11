@@ -1,0 +1,11 @@
+#env
+env/
+
+# Env
+.env
+
+# Artifacts
+chunk_vecs.npy
+meta.jsonl
+skipped_blocks.jsonl
+notion_hnsw_hnswlib.index

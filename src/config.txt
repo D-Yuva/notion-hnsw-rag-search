@@ -1,0 +1,19 @@
+-----------------------
+IF YOU WANT base INSTEAD OF large
+MODEL_NAME = "intfloat/e5-base-v2"   # or "intfloat/e5-large-v2"
+EMBED_DIM  = 768                     # 1024 if you switch to e5-large-v2
+
+# Chunking
+CHUNK_SIZE = 450
+CHUNK_OVERLAP = 60
+
+# HNSW graph
+HNSW_M = 32
+EF_CONSTRUCTION = 200
+EF_SEARCH_DEFAULT = 128
+-----------------------
+# Artifacts (relative to repo root or current working dir)
+INDEX_PATH = "notion_hnsw_hnswlib.index"
+EMB_PATH   = "chunk_vecs.npy"
+META_PATH  = "meta.jsonl"
+SKIPPED_PATH = "skipped_blocks.jsonl"
