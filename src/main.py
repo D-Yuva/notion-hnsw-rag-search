@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from notion_client import Client
 import httpx
+from httpx import RemoteProtocolError
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from notion_client.errors import APIResponseError, RequestTimeoutError
@@ -13,8 +14,23 @@ import hnswlib
 
 load_dotenv()
 
+import torch
+
+def device_name() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+DEVICE = device_name()
+print(f"🧠 Embedding device: {DEVICE}")
+
+# Tell SentenceTransformer to live on that device
+EMB_MODEL = SentenceTransformer("intfloat/e5-large-v2", device=DEVICE)
+
 httpx_client = httpx.Client(
-    timeout=httpx.Timeout(60.0, connect=10.0)  # 60s read/write, 10s connect
+    timeout=httpx.Timeout(100.0, connect=15.0)  # 60s read/write, 10s connect
 )
 
 notion = Client(
@@ -81,17 +97,16 @@ def flatten_blocks(block_id):
                 attempt = 0
                 while True:
                     try:
-                        resp = notion.blocks.children.list(block_id=bid, start_cursor=cursor) # Returns Children for example (First line: Heading, Second line: A bullet point. The Bullet point is considered as the children for the heading)
+                        resp = notion.blocks.children.list(block_id=bid, start_cursor=cursor)
                         break
-                    except RequestTimeoutError:
+                    except (RequestTimeoutError, RemoteProtocolError) as e:
                         if attempt >= max_retries:
                             raise
-                        wait = 2 ** attempt  # exponential backoff: 1s, 2s, 4s, 8s, 16s
-                        print(f"[retry] timeout on children.list({bid}); sleeping {wait}s and retrying...")
+                        wait = 2 ** attempt
+                        print(f"[retry] {type(e).__name__} on children.list({bid}); sleeping {wait}s and retrying...") # Retrys if the connection is lost
                         time.sleep(wait)
                         attempt += 1
                     except APIResponseError as e:
-                        # retry on transient 5xx or rate limits
                         if getattr(e, "code", None) in {"rate_limited"} or (500 <= getattr(e, "status", 0) < 600):
                             if attempt >= max_retries:
                                 raise
@@ -180,7 +195,7 @@ Why chunking ?
 """
 ------------EMBEDDING--------------
 """
-EMB_MODEL = SentenceTransformer("intfloat/e5-large-v2")
+EMB_MODEL = SentenceTransformer("intfloat/e5-large-v2", device=DEVICE)
 
 # Embedding each chunk
 def embed_passages(chunks):
@@ -192,7 +207,7 @@ def embed_passages(chunks):
         normalize_embeddings=True # magnitude affects the dot, cos similarity, so we normalise so only the angle is considered
     )
 
-    return np.asarray(vecs, dtype = "float32") # Returns a matrix for HNSW
+    return np.asarray(vecs, dtype="float32")  # Returns a matrix for HNSW
 
 def embed_query(query):
     # Search Query
