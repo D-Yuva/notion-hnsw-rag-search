@@ -4,28 +4,15 @@ from notion_client import Client
 import httpx
 from httpx import RemoteProtocolError
 import numpy as np
-from sentence_transformers import SentenceTransformer
 from notion_client.errors import APIResponseError, RequestTimeoutError
-from tqdm import tqdm  
-import json  
-import faiss  
+from tqdm import tqdm
+import json
+import faiss
 import time
 import hnswlib
+import ollama
 
 load_dotenv()
-
-import torch
-
-def device_name() -> str:
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
-
-DEVICE = device_name()
-print(f"🧠 Embedding device: {DEVICE}")
-
-# Tell SentenceTransformer to live on that device
-EMB_MODEL = SentenceTransformer("intfloat/e5-large-v2", device=DEVICE)
 
 httpx_client = httpx.Client(
     timeout=httpx.Timeout(100.0, connect=15.0)  # 60s read/write, 10s connect
@@ -41,13 +28,13 @@ notion = Client(
 """
 """
     Fetching Pages
-    - Connects to Notion 
+    - Connects to Notion
     - Fetches all of the pages
-    - Returns the Page ID 
+    - Returns the Page ID
 """
 def all_pages():
     pages = {} # Stores the found Page ID and avoids duplicates
-    cursor = None # 
+    cursor = None #
     while True:
         resp = notion.search(
             **({"start_cursor": cursor} if cursor else {}), # Create a dictionary when true if not empty dict
@@ -55,10 +42,10 @@ def all_pages():
         )
         for p in resp.get("results", []): # The API key returns a JSON results
             pages[p["id"]] = p # Doesn't allow Duplicates
-        if not resp.get("has_more"):  
+        if not resp.get("has_more"):
             break # If there are no more pages to fetch then break
         cursor = resp["next_cursor"] # If there are more pages to fetch then move to the next page using next cursor
-    return list(pages.values()) # Returns a list of Pages 
+    return list(pages.values()) # Returns a list of Pages
 
 """
     Converting each block to text
@@ -188,32 +175,42 @@ def chunk_words(text, size = 450, overlap = 60):
 Why chunking ?
 - Size Control: e5-base-v2 → 512 tokens max
 - Overlap: Helps to avoid the loss of context
-- Efficenty 
+- Efficenty
 """
 """
 ------------EMBEDDING--------------
 """
-EMB_MODEL = SentenceTransformer("intfloat/e5-large-v2", device=DEVICE)
+# Define the Ollama model name as a constant
+OLLAMA_EMBED_MODEL = "nomic-embed-text:latest"
 
-# Embedding each chunk
+def embed_with_ollama(text, model_name=OLLAMA_EMBED_MODEL):
+    """Embeds a single text chunk using the Ollama embeddings API."""
+    try:
+        response = ollama.embeddings(
+            model=model_name,
+            prompt=text
+        )
+        # Different models may output 'embedding' or ('embeddings' as a list); latest always has 'embedding'
+        return response["embedding"]
+    except Exception as e:
+        print(f"[Ollama error] Embedding failed for input: {text[:30]}... :: {e}")
+
+
 def embed_passages(chunks):
-    texts = [f"passage: {c}" for c in chunks]
-    vecs = EMB_MODEL.encode(
-        texts,
-        batch_size=64,
-        show_progress_bar=True,
-        normalize_embeddings=True # magnitude affects the dot, cos similarity, so we normalise so only the angle is considered
-    )
+    """Embeds all text chunks and returns a numpy array of vectors."""
+    vectors = []
+    for chunk in tqdm(chunks, desc="Embedding chunks with Ollama"):
+        prep_text = f"search_document: {chunk}" # to clarify the intent of the input and improve the quality and alignment of the embeddings.
+        emb = embed_with_ollama(prep_text) 
+        vectors.append(emb)
+    # Convert to numpy array
+    return np.asarray(vectors, dtype="float32")
 
-    return np.asarray(vecs, dtype="float32")  # Returns a matrix for HNSW
 
 def embed_query(query):
-    # Search Query
-    vec = EMB_MODEL.encode(
-        [f"query: {query}"],
-        normalize_embeddings=True
-    )
-    return np.asarray(vec, dtype = "float32")
+    # Use the 'search_query:' prefix for the user's query
+    vec = embed_with_ollama([f"search_query: {query}"])
+    return vec
 
 
 # ---------------- MAIN: crawl -> chunk -> embed -> build HNSW ----------------
@@ -285,7 +282,7 @@ if __name__ == "__main__":
     # ------------ Embed all chunks ------------
     print("Embedding chunks...")
     chunk_vecs = embed_passages(all_chunks)
-    print("Embeddings shape:", chunk_vecs.shape)  # (N, 768) for e5-base-v2
+    print("Embeddings shape:", chunk_vecs.shape)
 
     # save embeddings + meta
     np.save(EMB_PATH, chunk_vecs)
@@ -302,13 +299,13 @@ if __name__ == "__main__":
 
     # Graph with these values
     p.init_index(
-        max_elements=num, 
+        max_elements=num,
         ef_construction = EF_CONSTRUCTION,
-        M = HNSW_M    
+        M = HNSW_M
     )
 
     # Add items
-    ids = np.arange(num) 
+    ids = np.arange(num)
     p.add_items(chunk_vecs, ids)
 
     p.set_ef(64)

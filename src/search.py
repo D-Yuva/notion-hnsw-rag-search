@@ -3,22 +3,21 @@ import numpy as np
 import hnswlib
 import os
 import httpx
-from sentence_transformers import SentenceTransformer
+import ollama
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv(), override=True)
 
 OUTPUT_DIR = "artifacts"
-MODEL_NAME = "intfloat/e5-large-v2"
+# MODEL_NAME = "intfloat/e5-large-v2" # This is no longer needed
 INDEX_PATH = os.path.join(OUTPUT_DIR, "notion_hnsw_hnswlib.index")
 META_PATH  = os.path.join(OUTPUT_DIR, "meta.jsonl")
-
-EMB_MODEL = SentenceTransformer(MODEL_NAME)
 
 # --- Ollama (local) ---
 OLLAMA_BASE  = os.getenv("OLLAMA_BASE", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
 if not OLLAMA_MODEL:
     raise RuntimeError("Missing OLLAMA_MODEL. Set it in your .env, e.g. OLLAMA_MODEL=llama3.1:8b-instruct")
+OLLAMA_EMBED_MODEL = "nomic-embed-text:latest"
 OLLAMA_THINK = os.getenv("OLLAMA_THINK", "false")  # disable chain-of-thought by default
 OLLAMA_TIMEOUT_SEC = int(os.getenv("OLLAMA_TIMEOUT_SEC", "600"))  # allow slow first-token models
 
@@ -71,18 +70,39 @@ class OllamaClient:
 
 _ollama = OllamaClient()
 
-"""
-    Converting my multi query into a vector array
-"""
+# --- Ollama Query Embeddings ---
+# --- Ollama Embeddings ---
+def ollama_embed(text: str) -> np.ndarray:
+    """Generates a single embedding for a given text using the Ollama embeddings API."""
+    try:
+        response = ollama.embeddings(
+            model=OLLAMA_EMBED_MODEL,
+            prompt=text  # Correct for a single string input
+        )
+        return response["embedding"]
+    
+    except Exception as e:
+        raise LLMError(f"Ollama embedding failed: {e}")
 
 def embed_queries(qs: list[str]) -> np.ndarray:
-    v = EMB_MODEL.encode([f"query: {q}" for q in qs], normalize_embeddings=True)
-    return np.asarray(v, dtype="float32") # Returns an array of queries embed_queries(["what is AI?", "define machine learning"])
+    """
+    Converts a list of queries into a vector array using Ollama.
+    The 'nomic-embed-text' model recommends a 'search_query:' prefix.
+    """
+    prefixed_qs = []
+    # Loop through each query and embed them individually.
+    for q in qs:
+        prep_text = f"search_query: {q}"
+        emb = ollama_embed(prep_text)
+        prefixed_qs.append(emb)
+        
+    return np.asarray(prefixed_qs, dtype="float32")
 
 # Backward-compatible wrapper
-
 def embed_query(q: str) -> np.ndarray:
+    # This wrapper remains the same, but it now calls the corrected embed_queries.
     return embed_queries([q])
+
 
 # Connects the MetaData (page_id, url, chunk_idx, text) with the chunks
 def load_meta(path=META_PATH):
@@ -137,14 +157,14 @@ def search_knn_multi(p: hnswlib.Index, qvecs: np.ndarray, per_query_k: int = 50)
     # RUNS KNN for each query
     """
     labels_list: shape (Q, k) → the indices of the top-k chunks for all queries.
-	dists_list: shape (Q, k) → the distances to those chunks.
+    dists_list: shape (Q, k) → the distances to those chunks.
     """
     labels_list, dists_list = [], []
 
     try:
         """
         labels_batch: shape (Q, k) → the indices of the top-k chunks for each query.
-	    dists_batch: shape (Q, k) → the distances to those chunks.
+        dists_batch: shape (Q, k) → the distances to those chunks.
         """
         labels_batch, dists_batch = p.knn_query(qvecs, k = per_query_k)
         for i in range(qvecs.shape[0]):
@@ -170,7 +190,7 @@ def rrf_fuse(rank_lists: list[list[int]], k: int = 50, k_rrf: int = 60) -> list[
     for ranks in rank_lists: # Will parse through the list of document IDS -> labels_list
         for r, doc_id in enumerate(ranks, start=1):
             scores[int(doc_id)] += 1.0 / (k_rrf + r)
-    # Sorts the array with the score, dict cannot be sorted 
+    # Sorts the array with the score, dict cannot be sorted
     fused = sorted(scores.items(), key=lambda x: x[1], reverse=True) # Converts into a list of tuple -> From this scores = {10: 0.0489, 20: 0.0325, 30: 0.0320} to [(10, 0.0489), (20, 0.0325), (30, 0.0320)]
     return [doc_id for doc_id, _ in fused][:k] # Returns only the doc ID
 
@@ -196,7 +216,8 @@ def generate_answer_with_ollama(query: str, context: str) -> str:
     return _ollama.chat(messages, temperature=0.2, max_tokens=800).strip()
 
 if __name__ == "__main__":
-    dim = EMB_MODEL.get_sentence_embedding_dimension()  # Gets the dimension of e5-large-v2 (The embedded vector size)
+    # The dimension of nomic-embed-text is 768.
+    dim = 768
 
     p = hnswlib.Index(space='cosine', dim=dim)
     p.load_index(INDEX_PATH)
@@ -214,8 +235,8 @@ if __name__ == "__main__":
             # 1) Use LLM to generate diverse sub-queries (Ollama)
             subqs = generate_subqueries(q, max_alts=4)
 
-            # 2) Embed all sub-queries at once
-            qvecs = embed_queries(subqs) 
+            # 2) Embed all sub-queries at once using the Ollama model
+            qvecs = embed_queries(subqs)
 
             # 3) Run HNSW KNN for each sub-query (batched when possible)
             per_labels, per_dists = search_knn_multi(p, qvecs, per_query_k=50)
