@@ -1,8 +1,3 @@
------------------------
-IF YOU WANT base INSTEAD OF large
-MODEL_NAME = "intfloat/e5-base-v2"   # or "intfloat/e5-large-v2"
-EMBED_DIM  = 768                     # 1024 if you switch to e5-large-v2
-
 # Chunking
 CHUNK_SIZE = 450
 CHUNK_OVERLAP = 60
